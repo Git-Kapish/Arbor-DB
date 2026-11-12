@@ -1,16 +1,53 @@
 # ArborDB
 
 [![CI](https://github.com/Git-Kapish/Arbor-DB/actions/workflows/ci.yml/badge.svg)](https://github.com/Git-Kapish/Arbor-DB/actions/workflows/ci.yml)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)
+![CMake](https://img.shields.io/badge/CMake-3.16%2B-064F8C)
+![Docker](https://img.shields.io/badge/Docker-supported-2496ED)
+![GoogleTest](https://img.shields.io/badge/Tests-GoogleTest-4285F4)
+![License](https://img.shields.io/badge/License-MIT-green)
 
 A single-node, disk-based relational database engine written from scratch in C++17. No embedded database, no third-party storage engine, no parser generator: every layer is hand-built.
 
-```
-SQL ─▶ Parser ─▶ Binder ─▶ Optimizer ─▶ Executors (Volcano) ─▶ TableHeap / B+Tree ─▶ Buffer pool (LRU-K) ─▶ DiskManager
-         (recursive   (names,    (rule-based)   Init()/Next()        │  row locks (strict 2PL, deadlock detection)
-          descent)     types)                                         └─ write-ahead log ─▶ ARIES recovery (Analysis → Redo → Undo)
+## Architecture
+
+```mermaid
+flowchart LR
+    A["SQL / TCP Client"] --> B["Lexer + Recursive-Descent Parser"]
+    B --> C["Binder"]
+    C --> D["Rule-Based Optimizer"]
+    D --> E["Volcano Executors"]
+    E --> F["TableHeap / B+Tree"]
+    F --> G["Buffer Pool<br/>LRU-K"]
+    G --> H["DiskManager"]
+    G --> I["WAL + ARIES Recovery"]
+    F --> J["Strict 2PL / MVCC"]
+    J --> I
+    H --> I
 ```
 
+**Execution path:** SQL → Parser → Binder → Optimizer → Volcano Executors → TableHeap / B+Tree → Buffer Pool → Disk.
+
+**Recovery path:** page changes → WAL → ARIES Analysis → Redo → Undo.
+
+**Concurrency:** strict two-phase locking with deadlock detection, or selectable snapshot-isolation MVCC.
+
 Design docs: [PRD](PRD.md) · [ARCHITECTURE](ARCHITECTURE.md) · [TECH_STACK](TECH_STACK.md) · [AGENTS](AGENTS.md) · [implementation plan](docs/IMPLEMENTATION_PLAN.md)
+
+## Highlights
+
+- C++17 database engine with a hand-built storage and query stack
+- 4 KB slotted-page storage and persistent free-page management
+- LRU-K buffer replacement with pinning and dirty-page handling
+- B+Tree indexing with split/merge logic, range iteration, and invariant checking
+- Write-ahead logging with ARIES-style Analysis, Redo, and Undo
+- Strict 2PL with row-level locks and event-driven deadlock detection
+- Snapshot-isolation MVCC as an alternative concurrency strategy
+- Hand-written SQL parser, binder, rule-based optimizer, and Volcano executors
+- TCP server/client using a custom protocol
+- ASan/UBSan and ThreadSanitizer verification
+- Crash-recovery testing using real `kill -9`
+- Layered benchmarks covering storage, indexing, buffering, WAL, concurrency, and SQL
 
 ## Status
 
@@ -23,7 +60,7 @@ Design docs: [PRD](PRD.md) · [ARCHITECTURE](ARCHITECTURE.md) · [TECH_STACK](TE
 | M5 Strict 2PL + deadlock detection | done | `test_concurrency` + `concurrency_stress_test` |
 | M6 SQL layer | done | `test_query_layer` (hand-computed fixtures in `tests/sql/`), shell `arbordb` |
 | M7 TCP server + client | done | `test_net` |
-| M7 MVCC (snapshot isolation), selectable per database | done | `test_mvcc` (snapshots, first-committer-wins, GC, write-skew demo vs 2PL), `concurrency_stress_test --mvcc`, SQL fixtures re-run under MVCC |
+| M8 MVCC (snapshot isolation), selectable per database | done | `test_mvcc` (snapshots, first-committer-wins, GC, write-skew demo vs 2PL), `concurrency_stress_test --mvcc`, SQL fixtures re-run under MVCC |
 
 ## Build and run
 
@@ -40,7 +77,7 @@ powershell scripts/docker-test.ps1                    # build + ctest
 powershell scripts/docker-test.ps1 -Cmd "/build/bin/arbordb /tmp/demo -c 'SELECT 1+1 FROM t;'"
 ```
 
-Debug builds run under AddressSanitizer + UBSan. The B+Tree suite (~17 s) and the stress run are slow for that reason.
+Debug builds run under AddressSanitizer + UBSan by default. The B+Tree suite (~17 s) and the stress run are slow for that reason.
 
 Debug builds run under AddressSanitizer + UBSan by default. Other build flavours (all go through `scripts/ci-build.sh`, the same script CI runs):
 
@@ -76,6 +113,9 @@ arbordb> EXPLAIN SELECT name FROM emp WHERE id >= 2 AND id < 5;
 ```
 
 ## Supported SQL
+
+ArborDB supports a practical subset of relational SQL, including DDL, DML, joins, grouping, aggregation, ordering, transactions, checkpoints, and query-plan inspection. NULLs follow SQL three-valued logic.
+
 
 `CREATE TABLE` (`INTEGER`, `DOUBLE`, `VARCHAR(n)`, `BOOLEAN`, `PRIMARY KEY` on an INTEGER column) · `CREATE [UNIQUE] INDEX` · `DROP TABLE` · `INSERT … VALUES` · `UPDATE … SET … WHERE` · `DELETE … WHERE` · `SELECT` with expressions, `WHERE` (`AND OR NOT`, comparisons, `IS [NOT] NULL`, `BETWEEN`, `IN (list)`, arithmetic), `[INNER] JOIN … ON`, comma/`CROSS JOIN`, aliases, self-joins, `GROUP BY`, `COUNT/SUM/MIN/MAX/AVG`, `HAVING`, `ORDER BY` (expression, alias, ordinal; NULLs first), `LIMIT` · `BEGIN/COMMIT/ROLLBACK` · `CHECKPOINT` · `EXPLAIN SELECT`. NULLs follow SQL three-valued logic. No subqueries, views, outer joins, `DISTINCT`, `OFFSET`, `LIKE`.
 
@@ -114,7 +154,7 @@ What is proven by `test_concurrency` / `concurrency_stress_test`: no dirty reads
 | Command (optional) | `Statement` variant + `Server` (a request becomes parsed statement objects run on the connection's `Session`) | mirrors the request/command split in the network layer |
 | Singleton | **deliberately not used as a global.** `BufferPoolManager` and `Catalog` are each created exactly once and owned by `Database` | ARCHITECTURE.md §9 lists them as narrow singletons; a global accessor would make it impossible to open two databases in one test process, so "one instance per database" is enforced by ownership instead |
 
-## Known gaps (honest list)
+## Known Limitations
 
 - **Isolation level.** Row-level strict 2PL gives no dirty reads, no lost updates and repeatable reads for rows that exist. There are **no predicate/range locks**, so phantoms are possible (a scan can miss or see a row inserted by a concurrent transaction). So this is *not* full serializability for arbitrary workloads; the stress test proves the invariants above for a fixed set of rows.
 - **Index scans are weaker than sequential scans.** Index entries are not locked or versioned, so an index lookup can miss a row another transaction has deleted but not yet committed. Indexes are unique (INTEGER column only), and an aborted delete followed by a concurrent insert of the same key can make the abort's index repair fail.
@@ -132,11 +172,11 @@ What is proven by `test_concurrency` / `concurrency_stress_test`: no dirty reads
 - The TCP server binds to localhost and has no authentication or TLS.
 - Platform: Linux only (POSIX I/O is confined to `src/storage/disk/`, `src/recovery/log_manager.cpp` and `src/net/`).
 
-## What I'd do at scale
+## Roadmap to Scale
 
 Latch-crabbing (or Bw-tree/OLC) B+Trees so index operations scale across cores; logged index changes (nested top actions) instead of rebuild-on-start; key-range / next-key locking, or serializable snapshot isolation (SSI) on top of the MVCC strategy, for real serializability; versioned indexes and an incremental vacuum for MVCC; fuzzy checkpoints plus log archiving/truncation; group commit with a dedicated log writer; full-page images or a doublewrite buffer for torn-page safety; a real cost-based optimizer with histograms and join-order search; a buffer pool with sharded latches and async I/O (`io_uring`); `VARCHAR` overflow pages; deadlock victim choice by work done instead of age; replication and distribution on top of the log.
 
-## Layout
+## Repository Layout
 
 ```
 src/storage/{disk,page,table}   DiskManager, Page/SlottedPage, TableHeap
@@ -151,3 +191,7 @@ src/net                         TCP protocol, Server, Client
 tools/                          crash_driver, concurrency_stress_test, arbordb_server, arbordb_client
 tests/ (+ tests/sql, tests/support)   unit tests, SQL fixtures, shared stress workloads
 ```
+
+## License
+
+ArborDB is released under the [MIT License](LICENSE).
