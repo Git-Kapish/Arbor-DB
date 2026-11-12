@@ -1,0 +1,61 @@
+name: CI
+
+# Builds the Docker dev image (docker/Dockerfile) and runs the whole test suite in it, three ways:
+#   * Debug + AddressSanitizer/UBSan   memory errors, UB
+#   * Debug + ThreadSanitizer          data races, lock-order inversions in the concurrency code
+#   * Release                          the optimized build (catches bugs hidden by -O0) + a benchmark smoke run
+# Everything runs through scripts/ci-build.sh, the same script `scripts/docker-test.ps1` uses locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debug + ASan/UBSan
+            type: Debug
+            sanitizer: address
+            docker_args: ""
+            after: "true"
+          - name: Debug + ThreadSanitizer
+            type: Debug
+            sanitizer: thread
+            # TSan (GCC 11) cannot start under the runner's high-entropy ASLR; ci-build.sh turns ASLR off with
+            # `setarch -R`, which Docker's default seccomp profile forbids.
+            docker_args: "--security-opt seccomp=unconfined"
+            after: "true"
+          - name: Release + benchmark smoke run
+            type: Release
+            sanitizer: none
+            docker_args: ""
+            after: "/build/bin/arbordb_bench --quick | tee /src/bench-quick.md"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the dev image
+        run: docker build -t arbordb-dev docker
+
+      - name: Configure, build and run all tests
+        run: |
+          set -o pipefail
+          docker run --rm ${{ matrix.docker_args }} -v "$PWD:/src" arbordb-dev \
+            bash -c "bash /src/scripts/ci-build.sh /build ${{ matrix.type }} ${{ matrix.sanitizer }} && ${{ matrix.after }}"
+
+      - name: Upload benchmark output
+        if: matrix.type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-quick
+          path: bench-quick.md

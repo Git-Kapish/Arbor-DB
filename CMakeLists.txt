@@ -64,3 +64,7 @@ set_tests_properties(crash_recovery PROPERTIES ENVIRONMENT "ARBORDB=$<TARGET_FIL
 # The interactive SQL shell.
 add_executable(arbordb src/main.cpp)
 target_link_libraries(arbordb PRIVATE arbordb_core)
+
+# Per-layer microbenchmarks (run from a Release build): ./bin/arbordb_bench [--quick] [buffer|btree|heap|txn|sql]
+add_executable(arbordb_bench bench/bench.cpp)
+target_link_libraries(arbordb_bench PRIVATE arbordb_core)

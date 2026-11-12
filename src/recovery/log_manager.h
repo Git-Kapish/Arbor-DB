@@ -1,5 +1,6 @@
 #pragma once
 
+#include <condition_variable>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -41,11 +42,16 @@ public:
 
 private:
     void WriteBufferLocked();
+    // Writes the buffer, then fsyncs WITHOUT holding mu_ so other threads can keep appending while the disk
+    // works; threads whose records the fsync covers just wait for it (group commit).
+    void FlushLocked(std::unique_lock<std::mutex>& lk);
     bool ReadAtLocked(uint64_t off, LogRecord* out);
 
     std::string path_;
     int fd_;
     std::mutex mu_;
+    std::condition_variable flush_done_;
+    bool flushing_{false};  // an fsync is in flight (only one at a time)
     std::vector<uint64_t> offsets_;  // offsets_[lsn-1] = byte offset of that record
     uint64_t file_end_{0};           // bytes already written to the file
     std::string buf_;                // appended but not yet written

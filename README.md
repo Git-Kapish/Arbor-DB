@@ -1,5 +1,7 @@
 # ArborDB
 
+[![CI](https://github.com/Git-Kapish/Arbor-DB/actions/workflows/ci.yml/badge.svg)](https://github.com/Git-Kapish/Arbor-DB/actions/workflows/ci.yml)
+
 A single-node, disk-based relational database engine written from scratch in C++17. No embedded database, no third-party storage engine, no parser generator: every layer is hand-built.
 
 ```
@@ -39,6 +41,19 @@ powershell scripts/docker-test.ps1 -Cmd "/build/bin/arbordb /tmp/demo -c 'SELECT
 ```
 
 Debug builds run under AddressSanitizer + UBSan. The B+Tree suite (~17 s) and the stress run are slow for that reason.
+
+Debug builds run under AddressSanitizer + UBSan by default. Other build flavours (all go through `scripts/ci-build.sh`, the same script CI runs):
+
+```bash
+powershell scripts/docker-test.ps1 -Sanitizer thread             # ThreadSanitizer (data races, lock-order inversions)
+powershell scripts/docker-test.ps1 -Type Release -Sanitizer none  # optimized build, whole suite
+powershell scripts/docker-test.ps1 -Type Release -Sanitizer none -Cmd "./bin/arbordb_bench --quick"   # benchmark smoke run
+# Linux/WSL equivalents:  scripts/ci-build.sh build-tsan Debug thread   |   cmake -DARBOR_SANITIZER=thread ...
+```
+
+**Verification matrix.** CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) builds the Docker dev image and runs all 11 test suites three ways: Debug + ASan/UBSan, Debug + ThreadSanitizer, and Release (plus a quick benchmark run uploaded as an artifact). TSan reported no data races or lock-order inversions across the concurrency, MVCC, network and recovery suites; I confirmed TSan is live in this setup by running a deliberately racy program through it. Getting TSan running needed `setarch -R` (GCC 11's TSan aborts under high-entropy ASLR) and a relaxed Docker seccomp profile. It also caught a real flaw in one of my tests (an order-of-evaluation-dependent oracle update in `test_bplus_tree`) that happened to pass under ASan.
+
+**Benchmarks.** `arbordb_bench` ([results and interpretation](docs/BENCHMARKS.md)) measures each layer separately: LRU vs LRU-K hit rate by access pattern, B+Tree operations, heap and WAL throughput, strict 2PL vs MVCC under contention, and end-to-end SQL. Headline findings: LRU-K gains 15 points of hit rate on scan-polluted workloads and ties elsewhere; a commit costs one fsync, so write throughput is a batching problem; the benchmark found and led to a fix for a real group-commit bottleneck (the log mutex was held across `fsync`); and with the disk out of the picture the engine does not yet scale across threads, which is the honest limit of its single-mutex buffer pool / lock table / log.
 
 ### Try it
 
@@ -111,6 +126,7 @@ What is proven by `test_concurrency` / `concurrency_stress_test`: no dirty reads
 - **Heap pages never compact automatically**, so deleted space is not reused until an explicit `SlottedPage::Compact()`. Tuples must fit in one 4 KB page.
 - **Page allocation is not logged.** The free list is rewritten but not fsynced on each allocation; the file length is trusted on open.
 - **Durability model tested:** process kill (`kill -9`) with the OS surviving. Power-loss torn pages are not handled (no full-page images / doublewrite).
+- **Does not scale across threads yet** (measured, see [BENCHMARKS](docs/BENCHMARKS.md)): one mutex each in the buffer pool, lock table and log means throughput falls as threads are added once fsync is not the bottleneck. `LRUKReplacer::Victim` is O(pool size) per eviction.
 - **Optimizer** has no statistics; the heap-page-count size heuristic is crude. Hash join keeps the build side in memory.
 - **MVCC is simplified**: snapshot isolation only (write skew possible, no SERIALIZABLE option such as SSI); the version store is in memory with a full-sweep GC every 64 commits (no memory cap, no incremental vacuum); only whole-tuple INSERT/UPDATE/DELETE are versioned; index scans are disabled in MVCC mode because B+Tree entries are not versioned.
 - The TCP server binds to localhost and has no authentication or TLS.

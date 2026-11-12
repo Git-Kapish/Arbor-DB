@@ -73,11 +73,22 @@ void LogManager::WriteBufferLocked() {
     buf_.clear();
 }
 
-void LogManager::Flush() {
-    std::lock_guard<std::mutex> g(mu_);
+void LogManager::FlushLocked(std::unique_lock<std::mutex>& lk) {
+    flushing_ = true;
     WriteBufferLocked();
-    fsync(fd_);  // the log's durability point
-    flushed_lsn_ = static_cast<lsn_t>(offsets_.size());
+    lsn_t covered = static_cast<lsn_t>(offsets_.size());  // everything appended so far is now in the file
+    lk.unlock();
+    fsync(fd_);  // the log's durability point; appends by other threads proceed meanwhile
+    lk.lock();
+    flushed_lsn_ = std::max(flushed_lsn_, covered);
+    flushing_ = false;
+    flush_done_.notify_all();
+}
+
+void LogManager::Flush() {
+    std::unique_lock<std::mutex> lk(mu_);
+    while (flushing_) flush_done_.wait(lk);
+    FlushLocked(lk);
 }
 
 lsn_t LogManager::FlushedLsn() {
@@ -86,11 +97,14 @@ lsn_t LogManager::FlushedLsn() {
 }
 
 void LogManager::FlushTo(lsn_t lsn) {
-    std::lock_guard<std::mutex> g(mu_);
-    if (flushed_lsn_ >= lsn) return;  // another committer's fsync already covered us (group commit)
-    WriteBufferLocked();
-    fsync(fd_);
-    flushed_lsn_ = static_cast<lsn_t>(offsets_.size());
+    std::unique_lock<std::mutex> lk(mu_);
+    while (flushed_lsn_ < lsn) {
+        if (!flushing_) {
+            FlushLocked(lk);  // we are the leader: this fsync covers every record appended so far
+            return;
+        }
+        flush_done_.wait(lk);  // someone else's fsync may already cover us
+    }
 }
 
 lsn_t LogManager::LastLsn() {
