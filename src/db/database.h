@@ -9,6 +9,7 @@
 
 #include "catalog/catalog.h"
 #include "concurrency/lock_manager.h"
+#include "concurrency/mvcc_manager.h"
 #include "concurrency/transaction_manager.h"
 #include "query/parser/ast.h"
 #include "query/plan.h"
@@ -26,7 +27,12 @@ struct QueryResult {
     std::vector<std::string> RowStrings() const;
 };
 
+// Which concurrency-control strategy the engine runs. Strict 2PL: readers lock, serializable for row access
+// (phantoms aside). MVCC: lock-free snapshot reads, snapshot isolation (write skew possible).
+enum class ConcurrencyMode { kTwoPL, kMVCC };
+
 struct DatabaseOptions {
+    ConcurrencyMode concurrency = ConcurrencyMode::kTwoPL;
     std::size_t buffer_pool_pages = 512;
     std::size_t index_pool_pages = 256;
 };
@@ -47,7 +53,9 @@ public:
     const RecoveryResult& LastRecovery() const { return recovery_; }
     Catalog& GetCatalog() { return *catalog_; }
     TransactionManager& Txns() { return *tm_; }
-    LockManager& Locks() { return cc_.Locks(); }
+    LockManager& Locks() { return *locks_; }  // row locks (all of them under 2PL, write locks under MVCC)
+    ConcurrencyControlManager& Concurrency() { return *cc_; }
+    ConcurrencyMode Mode() const { return opts_.concurrency; }
     BufferPoolManager& Pool() { return *bpm_; }
 
 private:
@@ -58,7 +66,8 @@ private:
     std::unique_ptr<DiskManager> dm_, index_dm_;
     std::unique_ptr<LogManager> log_;
     std::unique_ptr<BufferPoolManager> bpm_, index_bpm_;
-    TwoPLManager cc_;
+    std::unique_ptr<ConcurrencyControlManager> cc_;
+    LockManager* locks_{nullptr};
     std::unique_ptr<TransactionManager> tm_;
     std::unique_ptr<Catalog> catalog_;
     // DDL takes this exclusively, DML/queries share it: DDL never runs under a statement (documented gap:

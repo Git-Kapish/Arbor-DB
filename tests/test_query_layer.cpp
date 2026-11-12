@@ -89,9 +89,11 @@ std::vector<Block> ReadBlocks(const std::string& path) {
     return blocks;
 }
 
-void RunFixture(const std::string& file) {
+void RunFixture(const std::string& file, ConcurrencyMode mode = ConcurrencyMode::kTwoPL) {
     std::string path = std::string(ARBOR_SQL_DIR) + "/" + file;
-    Database db(NewDir("fx_" + file));
+    DatabaseOptions opts;
+    opts.concurrency = mode;
+    Database db(NewDir("fx_" + file + (mode == ConcurrencyMode::kMVCC ? "_mvcc" : "")), opts);
     Session s(&db);
     for (auto& b : ReadBlocks(path)) {
         std::string sql;
@@ -142,6 +144,11 @@ TEST(SqlFixtures, CompanySchemaJoinsAggregatesAndDml) { RunFixture("company.test
 TEST(SqlFixtures, ErrorsAreReportedAndHaveNoSideEffects) { RunFixture("errors.test"); }
 TEST(SqlFixtures, TypesNullsAndThreeValuedLogic) { RunFixture("types.test"); }
 TEST(SqlFixtures, OptimizerPlanShapes) { RunFixture("plans.test"); }
+
+// The same hand-computed results must come out under snapshot isolation (single-session semantics are identical).
+TEST(SqlFixturesMvcc, CompanySchemaJoinsAggregatesAndDml) { RunFixture("company.test", ConcurrencyMode::kMVCC); }
+TEST(SqlFixturesMvcc, ErrorsAreReportedAndHaveNoSideEffects) { RunFixture("errors.test", ConcurrencyMode::kMVCC); }
+TEST(SqlFixturesMvcc, TypesNullsAndThreeValuedLogic) { RunFixture("types.test", ConcurrencyMode::kMVCC); }
 
 // ---------------------------------------------------------------- parser
 namespace {

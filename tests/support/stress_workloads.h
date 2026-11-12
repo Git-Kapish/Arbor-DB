@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "concurrency/lock_manager.h"
+#include "concurrency/mvcc_manager.h"
 #include "concurrency/transaction_manager.h"
 #include "storage/table/table_heap.h"
 
@@ -31,7 +32,9 @@ struct StressEnv {
     std::unique_ptr<DiskManager> dm;
     std::unique_ptr<LogManager> log;
     std::unique_ptr<BufferPoolManager> bpm;
-    TwoPLManager cc;
+    std::unique_ptr<ConcurrencyControlManager> cc;
+    LockManager* locks{nullptr};
+    LockManager& Locks() { return *locks; }
     std::unique_ptr<TransactionManager> tm;
     std::unique_ptr<TableHeap> heap;
     std::vector<RID> accounts;
@@ -45,14 +48,23 @@ struct StressEnv {
     }
     static int64_t Value(const std::string& s) { return std::atoll(s.c_str() + s.find(':') + 1); }
 
-    StressEnv(const std::string& d, int n_accounts, int64_t initial) : dir(d), initial_balance(initial) {
+    StressEnv(const std::string& d, int n_accounts, int64_t initial, bool mvcc = false) : dir(d), initial_balance(initial) {
+        if (mvcc) {
+            auto m = std::make_unique<MVCCManager>();
+            locks = &m->Locks();
+            cc = std::move(m);
+        } else {
+            auto m = std::make_unique<TwoPLManager>();
+            locks = &m->Locks();
+            cc = std::move(m);
+        }
         std::string cmd = "rm -rf " + dir + " && mkdir -p " + dir;
         if (system(cmd.c_str()) != 0) throw std::runtime_error("mkdir failed");
         dm = std::make_unique<DiskManager>(dir + "/data.db");
         log = std::make_unique<LogManager>(dir + "/wal.log");
         bpm = std::make_unique<BufferPoolManager>(256, dm.get(), log.get());
-        tm = std::make_unique<TransactionManager>(log.get(), bpm.get(), &cc);
-        heap = std::make_unique<TableHeap>(bpm.get(), log.get(), &cc, TableHeap::CreateFirstPage(bpm.get()));
+        tm = std::make_unique<TransactionManager>(log.get(), bpm.get(), cc.get());
+        heap = std::make_unique<TableHeap>(bpm.get(), log.get(), cc.get(), TableHeap::CreateFirstPage(bpm.get()));
         auto t = tm->Begin();
         for (int i = 0; i < n_accounts; i++) accounts.push_back(heap->Insert(t.get(), Fmt("acct", i, initial)));
         counter = heap->Insert(t.get(), Fmt("ctr_", 0, 0));
@@ -173,7 +185,7 @@ inline StressResult RunMixedStress(StressEnv& env, StressStats& st, int threads,
     char buf[512];
     std::snprintf(buf, sizeof buf,
                   "transfers committed=%ld rolled back=%ld | audits=%ld violations=%ld | increments=%ld counter=%lld | "
-                  "deadlock aborts=%ld | final total=%lld expected=%lld",
+                  "retried aborts (deadlock or write conflict)=%ld | final total=%lld expected=%lld",
                   st.transfers_committed.load(), st.transfers_rolled_back.load(), st.audits.load(),
                   st.audit_violations.load(), st.increments_committed.load(), static_cast<long long>(ctr),
                   st.deadlock_aborts.load(), static_cast<long long>(total), static_cast<long long>(env.ExpectedTotal()));

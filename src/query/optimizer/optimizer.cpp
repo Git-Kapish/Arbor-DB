@@ -268,6 +268,7 @@ PlanPtr Optimizer::ChooseAccessPaths(PlanPtr n) {
         std::vector<bool> best_used;
         bool best_eq = false;
         for (auto& idx : scan->table->indexes) {
+            if (!use_index_scans_) break;
             auto node = std::make_shared<PlanNode>(PlanType::kIndexScan);
             *node = *scan;
             node->type = PlanType::kIndexScan;

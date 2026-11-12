@@ -32,8 +32,18 @@ Database::Database(const std::string& dir, DatabaseOptions opts) : opts_(opts) {
     index_dm_ = std::make_unique<DiskManager>(dir + "/index.db");
     index_bpm_ = std::make_unique<BufferPoolManager>(opts.index_pool_pages, index_dm_.get());
 
-    tm_ = std::make_unique<TransactionManager>(log_.get(), bpm_.get(), &cc_, recovery_.max_txn_id + 1);
-    catalog_ = std::make_unique<Catalog>(dir + "/catalog.meta", bpm_.get(), index_bpm_.get(), log_.get(), &cc_);
+    if (opts.concurrency == ConcurrencyMode::kMVCC) {
+        auto m = std::make_unique<MVCCManager>();
+        locks_ = &m->Locks();
+        cc_ = std::move(m);
+    } else {
+        auto m = std::make_unique<TwoPLManager>();
+        locks_ = &m->Locks();
+        cc_ = std::move(m);
+    }
+
+    tm_ = std::make_unique<TransactionManager>(log_.get(), bpm_.get(), cc_.get(), recovery_.max_txn_id + 1);
+    catalog_ = std::make_unique<Catalog>(dir + "/catalog.meta", bpm_.get(), index_bpm_.get(), log_.get(), cc_.get());
     catalog_->Load();
     catalog_->RebuildIndexes();
     tm_->Checkpoint();  // recovered state is now on disk; the next restart starts from here
@@ -96,9 +106,10 @@ QueryResult Session::RunPlanned(const std::function<PlanPtr()>& build, bool is_q
         while (auto t = ex->Next()) res.rows.push_back(std::move(t->values));
         if (autocommit) db_->tm_->Commit(txn);
     } catch (const TransactionAbortedException&) {
+        std::string reason = txn->abort_reason;
         db_->tm_->Abort(txn);
         if (!autocommit) txn_.reset();
-        throw DbError("deadlock detected: this transaction was chosen as the victim and rolled back; retry it");
+        throw DbError(std::string("transaction aborted (") + reason + "); it was rolled back, retry it");
     } catch (...) {
         db_->tm_->Abort(txn);  // ExecutionError etc.: undo everything this transaction did
         if (!autocommit) txn_.reset();
@@ -173,10 +184,10 @@ QueryResult Session::ExecuteStatement(const Statement& st) {
 
     Catalog* cat = db_->catalog_.get();
     if (auto* s = std::get_if<SelectStmt>(&st))
-        return RunPlanned([&] { return Optimizer().Optimize(Binder(cat).BindSelect(*s)); }, true);
+        return RunPlanned([&] { return Optimizer(db_->opts_.concurrency == ConcurrencyMode::kTwoPL).Optimize(Binder(cat).BindSelect(*s)); }, true);
     if (auto* e = std::get_if<ExplainStmt>(&st)) {
         std::shared_lock<std::shared_mutex> ddl(db_->ddl_mutex_);
-        PlanPtr plan = Optimizer().Optimize(Binder(cat).BindSelect(*e->select));
+        PlanPtr plan = Optimizer(db_->opts_.concurrency == ConcurrencyMode::kTwoPL).Optimize(Binder(cat).BindSelect(*e->select));
         QueryResult r;
         r.is_query = true;
         r.columns = {"plan"};
@@ -190,11 +201,11 @@ QueryResult Session::ExecuteStatement(const Statement& st) {
         return r;
     }
     if (auto* s = std::get_if<InsertStmt>(&st))
-        return RunPlanned([&] { return Optimizer().Optimize(Binder(cat).BindInsert(*s)); }, false);
+        return RunPlanned([&] { return Optimizer(db_->opts_.concurrency == ConcurrencyMode::kTwoPL).Optimize(Binder(cat).BindInsert(*s)); }, false);
     if (auto* s = std::get_if<UpdateStmt>(&st))
-        return RunPlanned([&] { return Optimizer().Optimize(Binder(cat).BindUpdate(*s)); }, false);
+        return RunPlanned([&] { return Optimizer(db_->opts_.concurrency == ConcurrencyMode::kTwoPL).Optimize(Binder(cat).BindUpdate(*s)); }, false);
     if (auto* s = std::get_if<DeleteStmt>(&st))
-        return RunPlanned([&] { return Optimizer().Optimize(Binder(cat).BindDelete(*s)); }, false);
+        return RunPlanned([&] { return Optimizer(db_->opts_.concurrency == ConcurrencyMode::kTwoPL).Optimize(Binder(cat).BindDelete(*s)); }, false);
     throw ExecutionError("unsupported statement");
 }
 

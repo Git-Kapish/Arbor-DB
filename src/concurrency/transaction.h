@@ -23,6 +23,11 @@ public:
     // LSN of this transaction's most recent log record (head of its prev_lsn chain).
     std::atomic<lsn_t> last_lsn{kInvalidLsn};
 
+    // MVCC: the commit timestamp this transaction reads as of (set by ConcurrencyControlManager::OnBegin).
+    std::atomic<uint64_t> snapshot_ts{0};
+    // Why a lock request failed; reported in TransactionAbortedException. Written only by the owning thread.
+    std::string abort_reason{"deadlock victim"};
+
     // In-memory compensation (e.g. undoing B+Tree changes). Run in reverse order on abort,
     // before locks are released. Index pages are not WAL-logged, so this is how index changes roll back.
     void AddUndoHook(std::function<void()> h) { undo_hooks_.push_back(std::move(h)); }
@@ -34,12 +39,12 @@ private:
     std::vector<std::function<void()>> undo_hooks_;
 };
 
-// Thrown by data-access code when a lock cannot be granted because the transaction was chosen as a
-// deadlock victim. The caller must roll the transaction back.
+// Thrown by data-access code when the concurrency-control layer refuses a transaction (deadlock victim,
+// or an MVCC write-write conflict). The caller must roll the transaction back.
 class TransactionAbortedException : public std::runtime_error {
 public:
-    explicit TransactionAbortedException(txn_id_t id)
-        : std::runtime_error("transaction " + std::to_string(id) + " aborted (deadlock victim)"), txn_id(id) {}
+    TransactionAbortedException(txn_id_t id, const std::string& reason)
+        : std::runtime_error("transaction " + std::to_string(id) + " aborted (" + reason + ")"), txn_id(id) {}
     txn_id_t txn_id;
 };
 

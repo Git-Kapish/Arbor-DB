@@ -16,6 +16,7 @@ std::unique_ptr<Transaction> TransactionManager::Begin() {
     r.txn_id = txn->Id();
     txn->last_lsn = log_->Append(&r);
     active_[txn->Id()] = txn.get();
+    if (cc_) cc_->OnBegin(txn.get());  // MVCC: choose the snapshot
     return txn;
 }
 
@@ -28,6 +29,7 @@ void TransactionManager::Commit(Transaction* txn) {
     log_->FlushTo(txn->last_lsn);  // commit point: durable before we report success
     txn->SetState(TxnState::kCommitted);
     txn->UndoHooks().clear();
+    if (cc_) cc_->OnCommit(txn);  // MVCC: stamp this transaction's versions with its commit timestamp
     if (cc_) cc_->ReleaseAllLocks(txn);  // strict 2PL: release only after the outcome is durable
     std::lock_guard<std::mutex> g(mu_);
     active_.erase(txn->Id());
@@ -50,6 +52,7 @@ void TransactionManager::Abort(Transaction* txn) {
     for (auto it = hooks.rbegin(); it != hooks.rend(); ++it) (*it)();
     hooks.clear();
     txn->SetState(TxnState::kAborted);
+    if (cc_) cc_->OnAbort(txn);  // MVCC: drop this transaction's versions (heap changes are already undone)
     if (cc_) cc_->ReleaseAllLocks(txn);
     std::lock_guard<std::mutex> g(mu_);
     active_.erase(txn->Id());

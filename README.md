@@ -21,7 +21,7 @@ Design docs: [PRD](PRD.md) · [ARCHITECTURE](ARCHITECTURE.md) · [TECH_STACK](TE
 | M5 Strict 2PL + deadlock detection | done | `test_concurrency` + `concurrency_stress_test` |
 | M6 SQL layer | done | `test_query_layer` (hand-computed fixtures in `tests/sql/`), shell `arbordb` |
 | M7 TCP server + client | done | `test_net` |
-| M7 MVCC | **not implemented** (stretch, see Known Gaps) | — |
+| M7 MVCC (snapshot isolation), selectable per database | done | `test_mvcc` (snapshots, first-committer-wins, GC, write-skew demo vs 2PL), `concurrency_stress_test --mvcc`, SQL fixtures re-run under MVCC |
 
 ## Build and run
 
@@ -55,6 +55,8 @@ arbordb> EXPLAIN SELECT name FROM emp WHERE id >= 2 AND id < 5;
 ```bash
 ./scripts/crash_recovery_test.sh   # kill -9 mid-transaction, restart, assert (3 scenarios, see below)
 ./bin/concurrency_stress_test --transactions 50 --iterations 10000
+./bin/concurrency_stress_test --transactions 50 --iterations 10000 --mvcc   # same workload under snapshot isolation
+./bin/arbordb /tmp/demo --mvcc      # SQL shell with MVCC instead of strict 2PL
 ./bin/arbordb_server /tmp/demo 5433 &  ./bin/arbordb_client 127.0.0.1 5433   # custom TCP protocol (src/net/protocol.h)
 ```
 
@@ -80,6 +82,8 @@ arbordb> EXPLAIN SELECT name FROM emp WHERE id >= 2 AND id < 5;
 **Concurrency.** `LockManager` is a real lock table: per-row queues, S/X modes, S→X upgrades, FIFO fairness so writers are not starved. `TwoPLManager` holds every lock until commit/abort (strict 2PL), so no transaction reads uncommitted data and aborts are always safe to undo. Deadlocks: whenever a transaction is about to block, the wait-for graph is rebuilt and searched for cycles (deterministic DFS); the **youngest** transaction in each cycle is aborted and its `Lock()` returns false. Detection is event-driven, so a deadlock resolves immediately and never waits on a timeout.
 What is proven by `test_concurrency` / `concurrency_stress_test`: no dirty reads (a reader blocks on a writer's X lock; after a writer rollback it sees the original value), no lost updates (read-then-write counter), repeatable reads of rows already read, and a bank invariant (concurrent transfers + full-table audits) that always holds. The default stress run (50 threads, 10 000 transactions) resolved ~10 000 deadlocks with zero violations. It takes minutes in the Docker/ASan environment because each commit is an fsync.
 
+**MVCC (alternative strategy, `--mvcc` / `ConcurrencyMode::kMVCC`).** `MVCCManager` implements the same `ConcurrencyControlManager` interface and gives **snapshot isolation**: each transaction reads the database as of the commit timestamp current when it began (plus its own writes), readers take no locks and never block, and writers take exclusive row locks held to the end with **first-committer-wins** (a writer that finds the row changed by a transaction that committed after its snapshot aborts with "write-write conflict"). The heap still holds the newest version of every tuple with the same WAL/ARIES logging; older committed versions live in an in-memory version store (chains of `{begin_ts, bytes}`), which recovery does not need because after a restart the heap only holds committed data. Garbage collection drops exactly the versions no active snapshot can read. What it provides: no dirty reads, no non-repeatable reads, no lost updates, no phantoms in scans. What it does **not**: serializability. Write skew is possible, and `test_mvcc` demonstrates it on purpose next to strict 2PL preventing the same interleaving (2PL: deadlock, one victim; MVCC: both commit and the invariant breaks). Same SQL fixtures pass under both modes; B+Tree indexes are not versioned, so in MVCC mode the optimizer plans sequential scans only (indexes still enforce uniqueness).
+
 **Query layer.** Hand-written lexer and recursive-descent parser (one method per grammar rule, see the grammar in `parser.h`). The binder resolves and qualifies every column against the catalog and builds a logical plan. The **rule-based** optimizer applies: predicate pushdown → join reordering (smaller input first; heap page count is the only size signal) → projection pushdown → access-path selection (`IndexScan` for `col =/</<=/>/>= const` on an indexed INTEGER column, `HashJoin` when there is an equi-condition, else `NestedLoopJoin`). It is explicitly not cost-based: there are no statistics or cardinality estimates. `EXPLAIN` prints the plan, and `tests/sql/plans.test` asserts plan shapes.
 
 **Catalog.** A dedicated text file (`catalog.meta`), rewritten atomically after each DDL statement; not WAL-logged. Indexes are not persisted at all: they live in a scratch file that is truncated at startup and rebuilt from the recovered heaps.
@@ -88,7 +92,7 @@ What is proven by `test_concurrency` / `concurrency_stress_test`: no dirty reads
 
 | Pattern | Class(es) | Why |
 |---|---|---|
-| Strategy | `Replacer` / `LRUKReplacer` (`src/buffer`); `ConcurrencyControlManager` / `TwoPLManager` (`src/concurrency`) | swap eviction policy or concurrency scheme without touching callers (an `MVCCManager` would slot in beside `TwoPLManager`) |
+| Strategy | `Replacer` / `LRUKReplacer` (`src/buffer`); `ConcurrencyControlManager` / `TwoPLManager` + `MVCCManager` (`src/concurrency`) | swap eviction policy or concurrency scheme without touching callers; the engine runs either concurrency strategy behind the same interface |
 | Iterator | `AbstractExecutor` with `Init()`/`Next()` and every operator under `src/query/executor`; `BPlusTree::Iterator` | Volcano composition: operators don't know their children's types |
 | Visitor | `ExprVisitor` / `ExprWalker` (`src/query/expression.h`): column collection, aggregate detection, binder scope checking, EXPLAIN printing | tree-walking logic lives outside the node classes |
 | Factory | `ExecutorFactory::Create` | the single plan-node → executor mapping |
@@ -108,13 +112,13 @@ What is proven by `test_concurrency` / `concurrency_stress_test`: no dirty reads
 - **Page allocation is not logged.** The free list is rewritten but not fsynced on each allocation; the file length is trusted on open.
 - **Durability model tested:** process kill (`kill -9`) with the OS surviving. Power-loss torn pages are not handled (no full-page images / doublewrite).
 - **Optimizer** has no statistics; the heap-page-count size heuristic is crude. Hash join keeps the build side in memory.
-- **MVCC (M7 stretch) is not implemented.** The `ConcurrencyControlManager` interface is the seam for it.
+- **MVCC is simplified**: snapshot isolation only (write skew possible, no SERIALIZABLE option such as SSI); the version store is in memory with a full-sweep GC every 64 commits (no memory cap, no incremental vacuum); only whole-tuple INSERT/UPDATE/DELETE are versioned; index scans are disabled in MVCC mode because B+Tree entries are not versioned.
 - The TCP server binds to localhost and has no authentication or TLS.
 - Platform: Linux only (POSIX I/O is confined to `src/storage/disk/`, `src/recovery/log_manager.cpp` and `src/net/`).
 
 ## What I'd do at scale
 
-Latch-crabbing (or Bw-tree/OLC) B+Trees so index operations scale across cores; logged index changes (nested top actions) instead of rebuild-on-start; key-range / next-key locking for real serializability, or MVCC with garbage collection (version chains, snapshot reads) so readers never block writers; fuzzy checkpoints plus log archiving/truncation; group commit with a dedicated log writer; full-page images or a doublewrite buffer for torn-page safety; a real cost-based optimizer with histograms and join-order search; a buffer pool with sharded latches and async I/O (`io_uring`); `VARCHAR` overflow pages; deadlock victim choice by work done instead of age; replication and distribution on top of the log.
+Latch-crabbing (or Bw-tree/OLC) B+Trees so index operations scale across cores; logged index changes (nested top actions) instead of rebuild-on-start; key-range / next-key locking, or serializable snapshot isolation (SSI) on top of the MVCC strategy, for real serializability; versioned indexes and an incremental vacuum for MVCC; fuzzy checkpoints plus log archiving/truncation; group commit with a dedicated log writer; full-page images or a doublewrite buffer for torn-page safety; a real cost-based optimizer with histograms and join-order search; a buffer pool with sharded latches and async I/O (`io_uring`); `VARCHAR` overflow pages; deadlock victim choice by work done instead of age; replication and distribution on top of the log.
 
 ## Layout
 

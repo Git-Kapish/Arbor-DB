@@ -30,7 +30,7 @@ TableHeap::TableHeap(BufferPoolManager* bpm, LogManager* log, ConcurrencyControl
 
 void TableHeap::Lock(Transaction* txn, const RID& rid, LockMode mode) {
     if (!cc_ || !txn) return;
-    if (!cc_->AcquireLock(txn, rid, mode)) throw TransactionAbortedException(txn->Id());
+    if (!cc_->AcquireLock(txn, rid, mode)) throw TransactionAbortedException(txn->Id(), txn->abort_reason);
 }
 
 // Log the operation, apply it to the page, stamp the page LSN. Caller holds the page's write latch,
@@ -77,6 +77,7 @@ RID TableHeap::Insert(Transaction* txn, const std::string& tuple) {
             op.page_id = pid;
             op.slot = rid.slot;
             op.after = tuple;
+            if (cc_ && txn) cc_->OnWrite(txn, rid, WriteKind::kInsert, false, std::string());
             LogAndApply(txn, page, op);
             page->WUnlatch();
             bpm_->UnpinPage(pid, true);
@@ -122,8 +123,10 @@ bool TableHeap::Delete(Transaction* txn, const RID& rid) {
     Page* page = MustFetch(bpm_, rid.page_id);
     page->WLatch();
     SlottedPage sp(page);
-    bool exists = rid.slot < sp.SlotCount() && !sp.IsDeleted(static_cast<uint16_t>(rid.slot));
+    auto old = rid.slot < sp.SlotCount() ? sp.Get(static_cast<uint16_t>(rid.slot)) : std::nullopt;
+    bool exists = old.has_value();
     if (exists) {
+        if (cc_ && txn) cc_->OnWrite(txn, rid, WriteKind::kDelete, true, std::string(old->first, old->second));
         PageOp op;
         op.kind = PageOpKind::kDelete;
         op.page_id = rid.page_id;
@@ -155,6 +158,7 @@ std::optional<RID> TableHeap::Update(Transaction* txn, const RID& rid, const std
         op.slot = slot;
         op.before.assign(old->first, old->second);
         op.after = tuple;
+        if (cc_ && txn) cc_->OnWrite(txn, rid, WriteKind::kUpdate, true, op.before);
         LogAndApply(txn, page, op);
         page->WUnlatch();
         bpm_->UnpinPage(rid.page_id, true);
@@ -168,15 +172,21 @@ std::optional<RID> TableHeap::Update(Transaction* txn, const RID& rid, const std
 }
 
 bool TableHeap::Get(Transaction* txn, const RID& rid, std::string* out, bool for_update) {
-    Lock(txn, rid, for_update ? LockMode::kExclusive : LockMode::kShared);
+    if (!cc_ || cc_->TakesReadLocks()) Lock(txn, rid, for_update ? LockMode::kExclusive : LockMode::kShared);
     Page* page = MustFetch(bpm_, rid.page_id);
     page->RLatch();
     SlottedPage sp(page);
     auto t = rid.slot < sp.SlotCount() ? sp.Get(static_cast<uint16_t>(rid.slot)) : std::nullopt;
-    if (t) out->assign(t->first, t->second);
+    bool visible;
+    if (cc_ && txn) {  // the concurrency strategy decides which version of the tuple this transaction sees
+        visible = cc_->ResolveRead(txn, rid, t.has_value(), t ? std::string(t->first, t->second) : std::string(), out);
+    } else {
+        visible = t.has_value();
+        if (t) out->assign(t->first, t->second);
+    }
     page->RUnlatch();
     bpm_->UnpinPage(rid.page_id, false);
-    return t.has_value();
+    return visible;
 }
 
 bool TableHeap::Next(Transaction* txn, Cursor* cur, RID* rid, std::string* out, bool for_update) {

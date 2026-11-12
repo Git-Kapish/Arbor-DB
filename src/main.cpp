@@ -63,12 +63,21 @@ std::size_t LastTerminator(const std::string& s) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Pull out --mvcc wherever it appears; the rest is <data_dir> [-c "SQL"].
+    DatabaseOptions opts;
+    std::vector<char*> args;
+    for (int i = 0; i < argc; i++) {
+        if (std::string(argv[i]) == "--mvcc") opts.concurrency = ConcurrencyMode::kMVCC;
+        else args.push_back(argv[i]);
+    }
+    argc = static_cast<int>(args.size());
+    argv = args.data();
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s <data_dir> [-c \"SQL\"]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <data_dir> [--mvcc] [-c \"SQL\"]\n", argv[0]);
         return 2;
     }
     try {
-        Database db(argv[1]);
+        Database db(argv[1], opts);
         if (db.LastRecovery().txns_undone || db.LastRecovery().records_redone)
             std::printf("-- recovery: redid %zu page changes, rolled back %zu unfinished transaction(s)\n",
                         db.LastRecovery().records_redone, db.LastRecovery().txns_undone);

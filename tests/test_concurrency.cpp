@@ -283,9 +283,9 @@ TEST(Strict2PL, LocksAreHeldUntilCommitNotJustUntilTheOperationEnds) {
     std::string s;
     env.heap->Get(t.get(), env.accounts[0], &s);
     env.heap->Get(t.get(), env.accounts[1], &s, true);
-    EXPECT_EQ(env.cc.Locks().LockCount(t->Id()), 2u);
+    EXPECT_EQ(env.Locks().LockCount(t->Id()), 2u);
     env.tm->Commit(t.get());
-    EXPECT_EQ(env.cc.Locks().LockCount(t->Id()), 0u);
+    EXPECT_EQ(env.Locks().LockCount(t->Id()), 0u);
 }
 
 TEST(Strict2PL, DeadlockThroughTheHeapAbortsOneTransactionAndTheOtherCommits) {

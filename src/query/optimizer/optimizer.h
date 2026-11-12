@@ -19,6 +19,9 @@ namespace arbordb {
 //                           input), the rest NestedLoopJoin; everything else SeqScan.
 class Optimizer {
 public:
+    // use_index_scans=false forces SeqScan everywhere. MVCC mode needs that: B+Tree entries are not versioned,
+    // so an index lookup could miss a row that is still visible in an older snapshot.
+    explicit Optimizer(bool use_index_scans = true) : use_index_scans_(use_index_scans) {}
     PlanPtr Optimize(PlanPtr logical);
 
 private:
@@ -26,6 +29,8 @@ private:
     PlanPtr ReorderJoins(PlanPtr n);
     void PushDownProjections(PlanPtr root);
     PlanPtr ChooseAccessPaths(PlanPtr n);
+
+    bool use_index_scans_;
 };
 
 }  // namespace arbordb
