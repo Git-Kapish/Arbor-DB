@@ -23,6 +23,7 @@ struct RID {
     uint32_t slot{0};
 
     bool operator==(const RID& o) const { return page_id == o.page_id && slot == o.slot; }
+    bool operator<(const RID& o) const { return page_id != o.page_id ? page_id < o.page_id : slot < o.slot; }
 };
 
 }  // namespace arbordb

@@ -86,7 +86,11 @@ lsn_t LogManager::FlushedLsn() {
 }
 
 void LogManager::FlushTo(lsn_t lsn) {
-    if (FlushedLsn() < lsn) Flush();
+    std::lock_guard<std::mutex> g(mu_);
+    if (flushed_lsn_ >= lsn) return;  // another committer's fsync already covered us (group commit)
+    WriteBufferLocked();
+    fsync(fd_);
+    flushed_lsn_ = static_cast<lsn_t>(offsets_.size());
 }
 
 lsn_t LogManager::LastLsn() {
