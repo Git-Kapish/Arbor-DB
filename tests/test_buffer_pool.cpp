@@ -10,6 +10,7 @@
 
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_k_replacer.h"
+#include "buffer/lru_replacer.h"
 
 using namespace arbordb;
 
@@ -298,4 +299,60 @@ TEST(BufferPool, ConcurrentFetchUnpinKeepsDataIntactAndLeaksNoPins) {
     for (auto& t : ts) t.join();
     EXPECT_EQ(bad.load(), 0);
     EXPECT_EQ(bpm.PinnedCount(), 0u);
+}
+
+// ---- plain LRU (the baseline policy) and pool statistics ----
+
+TEST(LRUReplacer, EvictsLeastRecentlyAccessedAndHonoursPins) {
+    LRUReplacer r;
+    for (frame_id_t f : {0, 1, 2}) {
+        r.RecordAccess(f);
+        r.Unpin(f);
+    }
+    r.RecordAccess(0);  // 0 is now the most recent
+    r.Pin(1);           // 1 is in use
+    frame_id_t v;
+    ASSERT_TRUE(r.Victim(&v));
+    EXPECT_EQ(v, 2);  // oldest evictable
+    ASSERT_TRUE(r.Victim(&v));
+    EXPECT_EQ(v, 0);
+    EXPECT_FALSE(r.Victim(&v));  // only the pinned frame is left
+    r.Unpin(1);
+    ASSERT_TRUE(r.Victim(&v));
+    EXPECT_EQ(v, 1);
+}
+
+TEST(BufferPool, PlainLruLosesTheHotSetToASequentialScanButLruKKeepsIt) {
+    for (bool lru_k : {false, true}) {
+        Env e(lru_k ? "bp_scan_lruk" : "bp_scan_lru");
+        std::unique_ptr<Replacer> rep;
+        if (lru_k) rep = std::make_unique<LRUKReplacer>(2);
+        else rep = std::make_unique<LRUReplacer>();
+        BufferPoolManager bpm(4, e.dm.get(), nullptr, std::move(rep));
+        page_id_t h1 = NewUnpinned(bpm), h2 = NewUnpinned(bpm);
+        for (int i = 0; i < 3; i++) {
+            Touch(bpm, h1);
+            Touch(bpm, h2);
+        }
+        for (int i = 0; i < 8; i++) NewUnpinned(bpm);  // a one-shot scan of pages never seen again
+        EXPECT_EQ(bpm.IsResident(h1), lru_k) << (lru_k ? "LRU-K" : "LRU");
+        EXPECT_EQ(bpm.IsResident(h2), lru_k) << (lru_k ? "LRU-K" : "LRU");
+    }
+}
+
+TEST(BufferPool, StatsCountHitsMissesAndEvictions) {
+    Env e("bp_stats");
+    BufferPoolManager bpm(2, e.dm.get());
+    page_id_t a = NewUnpinned(bpm), b = NewUnpinned(bpm), c = NewUnpinned(bpm);  // c evicts one of a/b
+    EXPECT_EQ(bpm.Stats().evictions, 1u);
+    bpm.ResetStats();
+    Touch(bpm, c);  // resident
+    Touch(bpm, c);
+    EXPECT_EQ(bpm.Stats().hits, 2u);
+    EXPECT_EQ(bpm.Stats().misses, 0u);
+    page_id_t gone = bpm.IsResident(a) ? b : a;
+    Touch(bpm, gone);  // miss -> evicts something
+    EXPECT_EQ(bpm.Stats().misses, 1u);
+    EXPECT_EQ(bpm.Stats().evictions, 1u);
+    EXPECT_NEAR(bpm.Stats().HitRate(), 2.0 / 3.0, 1e-9);
 }

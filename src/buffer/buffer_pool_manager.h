@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,13 @@ public:
     virtual ~LogFlusher() = default;
     virtual lsn_t FlushedLsn() = 0;
     virtual void FlushTo(lsn_t lsn) = 0;  // make the log durable at least through lsn
+};
+
+struct BufferPoolStats {
+    uint64_t hits{0};        // FetchPage served from a resident frame
+    uint64_t misses{0};      // FetchPage that had to read the page from disk
+    uint64_t evictions{0};   // frames reclaimed from other pages
+    double HitRate() const { return hits + misses ? static_cast<double>(hits) / static_cast<double>(hits + misses) : 0.0; }
 };
 
 // Fixed-capacity pool of page frames with pin counting, dirty tracking and pluggable eviction.
@@ -42,6 +50,8 @@ public:
     std::size_t PinnedCount();           // frames with pin_count > 0 (leak detection in tests)
     bool IsResident(page_id_t id);       // test hook
     DiskManager* Disk() { return disk_; }
+    BufferPoolStats Stats() const { return {hits_.load(), misses_.load(), evictions_.load()}; }
+    void ResetStats() { hits_ = misses_ = evictions_ = 0; }
 
 private:
     // Caller holds mu_. Returns a free frame (evicting if needed) or -1.
@@ -56,6 +66,7 @@ private:
     std::unordered_map<page_id_t, frame_id_t> page_table_;
     std::deque<frame_id_t> free_list_;
     std::mutex mu_;
+    std::atomic<uint64_t> hits_{0}, misses_{0}, evictions_{0};
 };
 
 // RAII pin: unpins on destruction. Use MarkDirty() if the page was modified.

@@ -45,6 +45,7 @@ lsn_t TableHeap::LogAndApply(Transaction* txn, Page* page, PageOp op) {
         r.op = op;
         lsn = log_->Append(&r);
         txn->last_lsn = lsn;
+        txn->wrote = true;
     }
     ApplyPageOp(page, op);
     if (lsn != kInvalidLsn) page->SetLSN(lsn);

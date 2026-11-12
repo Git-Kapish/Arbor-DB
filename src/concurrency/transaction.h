@@ -22,6 +22,9 @@ public:
 
     // LSN of this transaction's most recent log record (head of its prev_lsn chain).
     std::atomic<lsn_t> last_lsn{kInvalidLsn};
+    // Set once the transaction logs a page change. A transaction that never wrote has nothing to make
+    // durable, so its commit skips the log fsync. Written only by the owning thread.
+    bool wrote{false};
 
     // MVCC: the commit timestamp this transaction reads as of (set by ConcurrencyControlManager::OnBegin).
     std::atomic<uint64_t> snapshot_ts{0};

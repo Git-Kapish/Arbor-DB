@@ -204,9 +204,10 @@ TEST(BPlusTree, RandomOpsMatchOracleAndStayBalancedForManyFanouts) {
             bool grow_phase = (op / 500) % 2 == 0;
             bool do_insert = (rng() % 100) < (grow_phase ? 70 : 30);
             if (do_insert) {
+                bool was_new = oracle.count(k) == 0;
                 bool ok = t.Insert(k, Rid(k));
-                ASSERT_EQ(ok, oracle.count(k) == 0) << "cfg " << c.leaf << "/" << c.internal << " op " << op;
-                oracle[k] = oracle.count(k) ? oracle[k] : Rid(k);
+                ASSERT_EQ(ok, was_new) << "cfg " << c.leaf << "/" << c.internal << " op " << op;
+                if (was_new) oracle[k] = Rid(k);
             } else {
                 bool ok = t.Remove(k);
                 ASSERT_EQ(ok, oracle.erase(k) == 1) << "cfg " << c.leaf << "/" << c.internal << " op " << op;

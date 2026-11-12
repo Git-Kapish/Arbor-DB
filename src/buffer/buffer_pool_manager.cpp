@@ -32,6 +32,7 @@ frame_id_t BufferPoolManager::AcquireFrame() {
     }
     frame_id_t f;
     if (!replacer_->Victim(&f)) return -1;
+    evictions_++;
     Page& p = frames_[f];
     if (p.is_dirty_) WriteOut(p);  // pin_count == 0, so nobody can be modifying it
     page_table_.erase(p.page_id_);
@@ -44,12 +45,14 @@ Page* BufferPoolManager::FetchPage(page_id_t id) {
     std::lock_guard<std::mutex> g(mu_);
     auto it = page_table_.find(id);
     if (it != page_table_.end()) {
+        hits_++;
         Page& p = frames_[it->second];
         p.pin_count_++;
         replacer_->RecordAccess(it->second);
         replacer_->Pin(it->second);
         return &p;
     }
+    misses_++;
     frame_id_t f = AcquireFrame();
     if (f < 0) return nullptr;
     Page& p = frames_[f];

@@ -26,7 +26,9 @@ void TransactionManager::Commit(Transaction* txn) {
     r.txn_id = txn->Id();
     r.prev_lsn = txn->last_lsn;
     txn->last_lsn = log_->Append(&r);
-    log_->FlushTo(txn->last_lsn);  // commit point: durable before we report success
+    // Commit point: a writer is durable before we report success. A read-only transaction has nothing to
+    // protect, so it does not pay for an fsync (its BEGIN/COMMIT records are flushed by the next writer).
+    if (txn->wrote) log_->FlushTo(txn->last_lsn);
     txn->SetState(TxnState::kCommitted);
     txn->UndoHooks().clear();
     if (cc_) cc_->OnCommit(txn);  // MVCC: stamp this transaction's versions with its commit timestamp

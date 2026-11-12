@@ -7,10 +7,25 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 add_compile_options(-Wall -Wextra)
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+
+# Sanitizers: "auto" = AddressSanitizer+UBSan for Debug builds, none otherwise. ThreadSanitizer cannot be
+# combined with AddressSanitizer, so it is a separate build: -DARBOR_SANITIZER=thread
+set(ARBOR_SANITIZER "auto" CACHE STRING "auto | address | thread | none")
+if(ARBOR_SANITIZER STREQUAL "auto")
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(ARBOR_SANITIZER "address")
+  else()
+    set(ARBOR_SANITIZER "none")
+  endif()
+endif()
+if(ARBOR_SANITIZER STREQUAL "address")
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)
+elseif(ARBOR_SANITIZER STREQUAL "thread")
+  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=thread)
 endif()
+message(STATUS "ArborDB: build type '${CMAKE_BUILD_TYPE}', sanitizer '${ARBOR_SANITIZER}'")
 
 # Core library; later milestones add their sources here.
 file(GLOB_RECURSE ARBOR_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
