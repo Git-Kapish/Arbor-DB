@@ -62,6 +62,7 @@ void TransactionManager::Checkpoint() {
     ck.type = LogType::kCheckpoint;
     ck.redo_start_lsn = log_->LastLsn() + 1;
     bpm_->FlushAll();
+    bpm_->Disk()->Sync();  // fsync: the checkpoint promises these pages survive power loss, not just a process kill
     {
         std::lock_guard<std::mutex> g(mu_);
         for (auto& [id, t] : active_) ck.active_txns.push_back({id, t->last_lsn.load()});
