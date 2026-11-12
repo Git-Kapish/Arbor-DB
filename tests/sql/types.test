@@ -1,0 +1,95 @@
+statement ok
+CREATE TABLE mix (i INTEGER, d DOUBLE, s VARCHAR(20), b BOOLEAN);
+
+statement ok
+INSERT INTO mix VALUES (1, 1.5, 'hello', TRUE), (2, 2, 'it''s', FALSE), (3, NULL, NULL, NULL), (-4, -0.25, '', TRUE);
+
+query
+SELECT i, d, s, b FROM mix ORDER BY i;
+----
+-4|-0.25||true
+1|1.5|hello|true
+2|2|it's|false
+3|NULL|NULL|NULL
+
+# NULLs sort first ascending
+query
+SELECT i FROM mix ORDER BY d;
+----
+3
+-4
+1
+2
+
+query
+SELECT i FROM mix ORDER BY d DESC;
+----
+2
+1
+-4
+3
+
+query
+SELECT i FROM mix WHERE b ORDER BY i;
+----
+-4
+1
+
+query
+SELECT i FROM mix WHERE s = 'hello' OR i = 3 ORDER BY i;
+----
+1
+3
+
+# three-valued logic: NULL OR true is true; NULL > 1 is NULL so the row is filtered out
+query
+SELECT i FROM mix WHERE d > 1 OR i = 3 ORDER BY i;
+----
+1
+2
+3
+
+query
+SELECT i FROM mix WHERE NOT (d > 1) ORDER BY i;
+----
+-4
+
+query
+SELECT COUNT(*), COUNT(d), SUM(d), MIN(s), MAX(s) FROM mix;
+----
+4|3|3.25||it's
+
+# integer vs double comparison and mixed arithmetic
+query
+SELECT i FROM mix WHERE d = 2 ORDER BY i;
+----
+2
+
+query
+SELECT i + d FROM mix WHERE i = 1;
+----
+2.5
+
+query
+SELECT 7 / 2, 7 % 2, 7.0 / 2, -3 + 1 FROM mix WHERE i = 1;
+----
+3|1|3.5|-2
+
+statement ok
+UPDATE mix SET d = 10 WHERE i = 3;
+
+query
+SELECT d FROM mix WHERE i = 3;
+----
+10
+
+statement ok
+UPDATE mix SET d = i * 2;
+
+query
+SELECT i, d FROM mix ORDER BY i;
+----
+-4|-8
+1|2
+2|4
+3|6

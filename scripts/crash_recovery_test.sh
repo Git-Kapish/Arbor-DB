@@ -35,5 +35,42 @@ for round in 1 2 3 4 5; do
   "$DRIVER" verify-churn "$D" "$ACKED" || fail=1
 done
 
+echo "== scenario 3: SQL shell killed with -9 in the middle of an explicit transaction =="
+ARBORDB="${ARBORDB:-$(dirname "$DRIVER")/arbordb}"
+if [ -x "$ARBORDB" ]; then
+  D="$WORK/s3"; mkdir -p "$D"
+  mkfifo "$WORK/in3"
+  "$ARBORDB" "$D" < "$WORK/in3" > "$WORK/out3" 2>&1 &
+  PID=$!
+  exec 3> "$WORK/in3"
+  cat >&3 <<'SQL'
+CREATE TABLE acct (id INTEGER PRIMARY KEY, bal INTEGER);
+INSERT INTO acct VALUES (1, 100), (2, 200), (3, 300);
+UPDATE acct SET bal = 150 WHERE id = 1;
+BEGIN;
+UPDATE acct SET bal = 0 WHERE id = 2;
+DELETE FROM acct WHERE id = 3;
+INSERT INTO acct VALUES (4, 400);
+CHECKPOINT;
+INSERT INTO acct VALUES (5, 500);
+SELECT 'in-flight-ready' FROM acct WHERE id = 1;
+SQL
+  for _ in $(seq 1 100); do grep -q in-flight-ready "$WORK/out3" 2>/dev/null && break; sleep 0.1; done
+  grep -q in-flight-ready "$WORK/out3" || { echo "shell never reached the in-flight state"; cat "$WORK/out3"; exit 1; }
+  kill -9 $PID; wait $PID 2>/dev/null; exec 3>&-
+  echo "killed arbordb (pid $PID) with an open transaction that had updated, deleted and inserted rows"
+  q() { "$ARBORDB" "$D" -c "$1" | sed -n '3p' | tr -d ' '; }
+  "$ARBORDB" "$D" -c "SELECT COUNT(*) FROM acct;" | grep -E "recovery|^-- " || true
+  check() { [ "$(q "$1")" = "$2" ] && echo "  ok: $1 -> $2" || { echo "  FAIL: $1 -> got '$(q "$1")', want '$2'"; fail=1; }; }
+  check "SELECT COUNT(*) FROM acct;" 3
+  check "SELECT SUM(bal) FROM acct;" 650            # 150 + 200 + 300: committed update kept, in-flight changes gone
+  check "SELECT bal FROM acct WHERE id = 1;" 150    # committed update (autocommit) survived
+  check "SELECT bal FROM acct WHERE id = 2;" 200    # in-flight update rolled back
+  check "SELECT bal FROM acct WHERE id = 3;" 300    # in-flight delete rolled back
+  check "SELECT COUNT(*) FROM acct WHERE id >= 4;" 0   # in-flight inserts gone (and the rebuilt index agrees)
+else
+  echo "arbordb binary not found, skipping scenario 3"
+fi
+
 if [ $fail -eq 0 ]; then echo "PASS: committed data survived, uncommitted data did not"; else echo "FAIL"; fi
 exit $fail

@@ -179,7 +179,7 @@ bool TableHeap::Get(Transaction* txn, const RID& rid, std::string* out, bool for
     return t.has_value();
 }
 
-bool TableHeap::Next(Transaction* txn, Cursor* cur, RID* rid, std::string* out) {
+bool TableHeap::Next(Transaction* txn, Cursor* cur, RID* rid, std::string* out, bool for_update) {
     while (cur->page_id != kInvalidPageId) {
         Page* page = MustFetch(bpm_, cur->page_id);
         page->RLatch();
@@ -194,7 +194,7 @@ bool TableHeap::Next(Transaction* txn, Cursor* cur, RID* rid, std::string* out) 
             continue;
         }
         RID r{cur->page_id, cur->slot++};
-        if (Get(txn, r, out, false)) {  // takes the S lock, then re-checks under the lock
+        if (Get(txn, r, out, for_update)) {  // takes the lock, then re-checks under it
             *rid = r;
             return true;
         }

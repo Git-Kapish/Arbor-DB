@@ -29,6 +29,7 @@ foreach(test_src ${TEST_SOURCES})
   add_executable(${test_name} ${test_src})
   target_link_libraries(${test_name} PRIVATE arbordb_core GTest::gtest_main)
   target_include_directories(${test_name} PRIVATE ${CMAKE_SOURCE_DIR}/tests/support)
+  target_compile_definitions(${test_name} PRIVATE ARBOR_SQL_DIR="${CMAKE_SOURCE_DIR}/tests/sql")
   add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
 
@@ -43,3 +44,8 @@ endforeach()
 
 add_test(NAME crash_recovery
          COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/crash_recovery_test.sh $<TARGET_FILE:crash_driver>)
+set_tests_properties(crash_recovery PROPERTIES ENVIRONMENT "ARBORDB=$<TARGET_FILE:arbordb>")
+
+# The interactive SQL shell.
+add_executable(arbordb src/main.cpp)
+target_link_libraries(arbordb PRIVATE arbordb_core)

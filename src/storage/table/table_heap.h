@@ -51,7 +51,8 @@ public:
     Cursor Begin() const { return Cursor{first_page_id_, 0}; }
     // Advances to the next live tuple (taking an S lock on every slot it examines, deleted or not,
     // so it never reads another transaction's uncommitted work). Returns false at the end.
-    bool Next(Transaction* txn, Cursor* cur, RID* rid, std::string* out);
+    // for_update: take X locks instead of S (UPDATE/DELETE scans, avoiding S->X upgrade deadlocks).
+    bool Next(Transaction* txn, Cursor* cur, RID* rid, std::string* out, bool for_update = false);
 
     // Number of pages in the chain (used by the optimizer as a size estimate).
     std::size_t NumPages();
