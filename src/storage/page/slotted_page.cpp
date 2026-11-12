@@ -96,6 +96,13 @@ bool SlottedPage::Update(uint16_t slot, const char* data, uint16_t len) {
     return true;
 }
 
+bool SlottedPage::CanUpdate(uint16_t slot, uint16_t len) const {
+    if (len == 0 || slot >= SlotCount()) return false;
+    Slot s = GetSlot(slot);
+    if (s.flags & kFlagDeleted) return false;
+    return len <= s.capacity || FreeSpace() >= len;
+}
+
 void SlottedPage::Compact() {
     std::vector<char> copy(d_, d_ + kPageSize);
     uint16_t ptr = static_cast<uint16_t>(kPageSize);

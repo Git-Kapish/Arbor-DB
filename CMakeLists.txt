@@ -30,3 +30,14 @@ foreach(test_src ${TEST_SOURCES})
   target_link_libraries(${test_name} PRIVATE arbordb_core GTest::gtest_main)
   add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+
+# Helper executables (crash-test driver, stress test, ...): one per tools/*.cpp.
+file(GLOB TOOL_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/*.cpp)
+foreach(tool_src ${TOOL_SOURCES})
+  get_filename_component(tool_name ${tool_src} NAME_WE)
+  add_executable(${tool_name} ${tool_src})
+  target_link_libraries(${tool_name} PRIVATE arbordb_core)
+endforeach()
+
+add_test(NAME crash_recovery
+         COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/crash_recovery_test.sh $<TARGET_FILE:crash_driver>)

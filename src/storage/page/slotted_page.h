@@ -49,6 +49,8 @@ public:
     bool MarkDeleted(uint16_t slot);
     bool Undelete(uint16_t slot);
     bool Update(uint16_t slot, const char* data, uint16_t len);
+    // Would Update(slot, _, len) succeed? (live slot, and fits in place or in contiguous free space)
+    bool CanUpdate(uint16_t slot, uint16_t len) const;
     // Physically reclaim space. Tombstoned slots lose their bytes permanently.
     void Compact();
 
